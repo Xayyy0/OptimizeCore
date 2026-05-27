@@ -1,0 +1,15 @@
+server-motd: '&cServer Practice'
+server-whitelist: '&cServer in maintenance!\n\n&eFor more information join\nour discord.'
+server-maxplayers: 200
+
+webhook-unranked-duels: ''
+webhook-ranked-duels: ''
+webhook-parties: ''
+webhook-events: ''
+
+database:
+  host: localhost
+  port: 3306
+  username: root
+  password: omar
+  database: practice1
