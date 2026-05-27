@@ -1,0 +1,52 @@
+<?php
+
+declare(strict_types=1);
+
+namespace practice\item;
+
+use pocketmine\entity\Location;
+use pocketmine\entity\projectile\Throwable;
+use pocketmine\item\EnderPearl;
+use pocketmine\item\ItemIdentifier;
+use pocketmine\item\ItemTypeIds;
+use pocketmine\item\ItemUseResult;
+use pocketmine\math\Vector3;
+use pocketmine\player\Player;
+use pocketmine\utils\TextFormat;
+use practice\entity\EnderPearl as EntityEnderPearl;
+use practice\session\SessionFactory;
+
+class EnderPearlItem extends EnderPearl{
+
+	public function __construct(){
+		parent::__construct(new ItemIdentifier(ItemTypeIds::ENDER_PEARL), 'Ender Pearl');
+	}
+
+	public function getThrowForce() : float{
+		return 2.35;
+	}
+
+	public function onClickAir(Player $player, Vector3 $directionVector, array &$returnedItems) : ItemUseResult{
+		$session = SessionFactory::get($player);
+
+		if($session === null){
+			return ItemUseResult::FAIL();
+		}
+		$countdown = $session->getEnderpearl();
+
+		if($countdown !== null && $countdown > microtime(true)){
+			$player->sendMessage(TextFormat::colorize('&cYou have enderpearl cooldown'));
+			return ItemUseResult::FAIL();
+		}
+		$result = parent::onClickAir($player, $directionVector, $returnedItems);
+
+		if($result->equals(ItemUseResult::SUCCESS())){
+			$session->setEnderpearl(microtime(true) + 15.0);
+		}
+		return $result;
+	}
+
+	protected function createEntity(Location $location, Player $thrower) : Throwable{
+		return new EntityEnderPearl($location, $thrower);
+	}
+}
