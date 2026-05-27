@@ -1,0 +1,19 @@
+name: Practice
+version: 1.0.0
+author: JuqnGOOD
+authors: ["ItsMaipianX"]
+main: practice\Practice
+api: 5.0.0
+permissions:
+  arena.command:
+    default: op
+  duel.command:
+    default: op
+  kit.command:
+    default: op
+  who.command:
+    default: op
+  buildermode.command:
+    default: op
+  default.command:
+    default: true
