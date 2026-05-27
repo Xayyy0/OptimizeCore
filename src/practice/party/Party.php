@@ -1,0 +1,219 @@
+<?php
+
+declare(strict_types=1);
+
+namespace practice\party;
+
+use pocketmine\player\Player;
+use pocketmine\utils\TextFormat;
+use practice\duel\queue\QueueFactory;
+use practice\item\party\PartyDuelInviteItem;
+use practice\item\party\PartyDuelItem;
+use practice\item\party\PartyDuelLeaveItem;
+use practice\item\party\PartySplitItem;
+use practice\item\party\PartyInformationItem;
+use practice\item\party\PartyInviteItem;
+use practice\item\party\PartyLeaveItem;
+use practice\item\party\PartySettingItem;
+use practice\party\duel\Duel;
+use practice\party\duel\queue\PartyQueue;
+use practice\party\duel\queue\QueueFactory as PartyQueueFactory;
+use practice\session\SessionFactory;
+
+class Party{
+
+	public const DEFAULT_PLAYERS = 6;
+	public const EIGHT_PLAYERS = 8;
+	public const TEN_PLAYERS = 10;
+
+	/**
+	 * @param string          $name
+	 * @param Player          $owner
+	 * @param int             $maxPlayers
+	 * @param bool            $open
+	 * @param Player[]        $members
+	 * @param PartyQueue|null $queue
+	 * @param Duel|null       $duel
+	 */
+	public function __construct(
+		protected string $name,
+		protected Player $owner,
+		protected int $maxPlayers = self::DEFAULT_PLAYERS,
+		protected bool $open = true,
+		protected array $members = [],
+		protected ?PartyQueue $queue = null,
+		protected ?Duel $duel = null
+	){
+		$this->addMember($owner, false);
+	}
+
+	public function addMember(Player $player, bool $announce = true) : void{
+		$session = SessionFactory::get($player);
+
+		if($session === null){
+			return;
+		}
+
+		if($session->inQueue()){
+			QueueFactory::remove($player);
+		}
+		$session->setParty($this);
+
+		$player->getInventory()->clearAll();
+		$player->getArmorInventory()->clearAll();
+		$player->getOffHandInventory()->clearAll();
+
+		$this->giveItems($player);
+		$this->members[spl_object_hash($player)] = $player;
+
+		if($announce){
+			$this->broadcastMessage('&a' . $player->getName() . ' joined the party.');
+		}
+	}
+
+	public function inQueue() : bool{
+		return $this->queue !== null;
+	}
+
+	public function giveItems(Player $player) : void{
+		if(!$this->isOwner($player)){
+			$player->getInventory()->setContents([
+				7 => new PartyInformationItem,
+				8 => new PartyLeaveItem
+			]);
+			return;
+		}
+
+		if($this->inQueue()){
+			$player->getInventory()->setContents([
+				8 => new PartyDuelLeaveItem,
+			]);
+			return;
+		}
+		$player->getInventory()->setContents([
+			0 => new PartyDuelItem,
+			1 => new PartySplitItem,
+			4 => new PartyInviteItem,
+			5 => new PartyDuelInviteItem,
+			7 => new PartySettingItem,
+			8 => new PartyLeaveItem
+		]);
+	}
+
+	public function isOwner(Player $player) : bool{
+		return $player->getXuid() === $this->owner->getXuid();
+	}
+
+	public function broadcastMessage(string $message) : void{
+		foreach($this->members as $member){
+			$member->sendMessage(TextFormat::colorize($message));
+		}
+	}
+
+	public function getName() : string{
+		return $this->name;
+	}
+
+	public function getOwner() : Player{
+		return $this->owner;
+	}
+
+	/**
+	 * @return Player[]
+	 */
+	public function getMembers() : array{
+		return $this->members;
+	}
+
+	public function getMaxPlayers() : int{
+		return $this->maxPlayers;
+	}
+
+	public function getQueue() : ?PartyQueue{
+		return $this->queue;
+	}
+
+	public function isOpen() : bool{
+		return $this->open;
+	}
+
+	public function isFull() : bool{
+		return count($this->members) >= $this->maxPlayers;
+	}
+
+	public function setOwner(Player $player) : void{
+		$this->owner = $player;
+	}
+
+	public function setMaxPlayers(int $value) : void{
+		$this->maxPlayers = $value;
+	}
+
+	public function setOpen(bool $value) : void{
+		$this->open = $value;
+	}
+
+	public function setQueue(?PartyQueue $queue) : void{
+		$this->queue = $queue;
+	}
+
+	public function setDuel(?Duel $duel) : void{
+		$this->duel = $duel;
+	}
+
+	public function broadcastTitle(string $title, string $subTitle = '') : void{
+		foreach($this->members as $member){
+			$member->sendTitle($title, $subTitle);
+		}
+	}
+
+	public function disband(bool $announce = true) : void{
+		if($this->inQueue()){
+			PartyQueueFactory::remove($this);
+		}elseif($this->inDuel()){
+			$duel = $this->getDuel();
+			$duel->finish($this);
+		}
+
+		foreach($this->members as $member){
+			$this->removeMember($member, false);
+
+			if($announce){
+				$member->sendMessage(TextFormat::colorize('&cThe party has been eliminated!'));
+			}
+		}
+		PartyFactory::remove($this->name);
+	}
+
+	public function inDuel() : bool{
+		return $this->duel !== null;
+	}
+
+	public function getDuel() : ?Duel{
+		return $this->duel;
+	}
+
+	public function removeMember(Player $player, bool $announce = true) : void{
+		if(!$this->isMember($player)){
+			return;
+		}
+		$player->getInventory()->clearAll();
+		$player->getArmorInventory()->clearAll();
+		$player->getOffHandInventory()->clearAll();
+		$player->getCursorInventory()->clearAll();
+		$player->getCraftingGrid()->clearAll();
+
+		$session = SessionFactory::get($player);
+		$session?->giveLobbyItems();
+		$session?->setParty(null);
+		unset($this->members[spl_object_hash($player)]);
+
+		if($announce){
+			$this->broadcastMessage('&c' . $player->getName() . ' left the party.');
+		}
+	}
+
+	public function isMember(Player $player) : bool{
+		return isset($this->members[spl_object_hash($player)]);
+	}
+}
