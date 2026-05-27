@@ -1,0 +1,469 @@
+<?php
+
+declare(strict_types=1);
+
+namespace practice\party\duel;
+
+use CortexPE\DiscordWebhookAPI\Embed;
+use CortexPE\DiscordWebhookAPI\Message;
+use CortexPE\DiscordWebhookAPI\Webhook;
+use pocketmine\event\block\BlockBreakEvent;
+use pocketmine\event\block\BlockPlaceEvent;
+use pocketmine\event\entity\EntityDamageByEntityEvent;
+use pocketmine\event\entity\EntityDamageEvent;
+use pocketmine\event\player\PlayerMoveEvent;
+use pocketmine\player\GameMode;
+use pocketmine\player\Player;
+use pocketmine\utils\TextFormat;
+use pocketmine\world\Position;
+use pocketmine\world\World;
+use practice\party\Party;
+use practice\Practice;
+use practice\session\SessionFactory;
+use practice\utils\ServerUtils;
+use practice\world\async\WorldDeleteAsync;
+use practice\world\WorldFactory;
+
+class Duel{
+
+	public const TYPE_NODEBUFF = 0;
+	public const TYPE_POTPVP = 1;
+	public const TYPE_GAPPLE = 2;
+	public const TYPE_FIST = 3;
+	public const TYPE_COMBO = 4;
+	public const TYPE_BUILDUHC = 5;
+	public const TYPE_CAVEUHC = 6;
+	public const TYPE_FINALUHC = 7;
+	public const TYPE_HG = 8;
+    public const TYPE_BOXING = 9;
+    public const TYPE_SOUP = 10;
+    public const TYPE_BATTLERUSH = 7;
+
+	public const STARTING = 0;
+	public const RUNNING = 1;
+	public const RESTARTING = 2;
+
+	public function __construct(
+		protected int $id,
+		protected int $typeId,
+		protected string $worldName,
+		protected Party $firstParty,
+		protected Party $secondParty,
+		protected World $world,
+		protected int $status = self::STARTING,
+		protected int $starting = 5,
+		protected int $running = 0,
+		protected int $restarting = 5,
+		protected string $winner = '',
+		protected string $loser = '',
+		protected array $spectators = [],
+		protected array $blocks = [],
+		protected ?Party $mainParty = null
+	){
+		$this->prepare();
+		$this->init();
+	}
+
+	public function setMainParty(?Party $party) : void{
+		$this->mainParty = $party;
+	}
+
+	protected function prepare() : void{
+		$worldName = $this->worldName;
+		$world = $this->world;
+
+		$world->setTime(World::TIME_DAY);
+		$world->stopTime();
+
+		/** @var \practice\world\World $worldData */
+		$worldData = WorldFactory::get($worldName);
+		$firstPosition = $worldData->getFirstPosition();
+		$secondPosition = $worldData->getSecondPosition();
+
+		foreach($this->firstParty->getMembers() as $member){
+			$member->setGamemode(GameMode::SURVIVAL());
+			$member->setNoClientPredictions(true);
+
+			$member->getInventory()->clearAll();
+			$member->getArmorInventory()->clearAll();
+			$member->getCursorInventory()->clearAll();
+			$member->getOffHandInventory()->clearAll();
+
+			$session = SessionFactory::get($member);
+			$inventory = $session?->getInventory(strtolower(DuelFactory::getName($this->typeId)));
+			$inventory?->giveKit();
+
+			$member->setNameTag(TextFormat::BLUE . $member->getName());
+			$member->teleport(Position::fromObject($firstPosition->add(0.5, 0, 0.5), $this->world));
+		}
+
+		foreach($this->secondParty->getMembers() as $member){
+			$member->setGamemode(GameMode::SURVIVAL());
+			$member->setNoClientPredictions(true);
+
+			$member->getInventory()->clearAll();
+			$member->getArmorInventory()->clearAll();
+			$member->getCursorInventory()->clearAll();
+			$member->getOffHandInventory()->clearAll();
+
+			$session = SessionFactory::get($member);
+			$inventory = $session?->getInventory(strtolower(DuelFactory::getName($this->typeId)));
+			$inventory?->giveKit();
+
+			$member->setNameTag(TextFormat::RED . $member->getName());
+			$member->teleport(Position::fromObject($secondPosition->add(0.5, 0, 0.5), $this->world));
+		}
+	}
+
+	protected function init() : void{ }
+
+	public function getId() : int{
+		return $this->id;
+	}
+
+	public function getTypeId() : int{
+		return $this->typeId;
+	}
+
+	public function scoreboard(Player $player) : array{
+		switch($this->status){
+			case self::STARTING:
+				return [
+					' &fParty match starting'
+				];
+
+			case self::RESTARTING:
+				return [
+					' &fParty match ended'
+				];
+
+			default:
+				if($this->isSpectator($player)){
+					return [
+						' &fKit: &e' . DuelFactory::getName($this->typeId),
+						' &r&r',
+						' &fDuration: &e' . gmdate('i:s', $this->running),
+						' &fSpectators: &e' . count($this->spectators)
+					];
+				}
+				$opponent = $this->getOpponent($player);
+				$players = array_filter($opponent->getMembers(), function(Player $player) : bool{
+					return !$this->isSpectator($player);
+				});
+
+				return [
+					' &fKit: &e' . DuelFactory::getName($this->typeId),
+					' &fDuration: &e' . gmdate('i:s', $this->running),
+					' &r&r',
+					' &fPlayers: &e' . count($players)
+				];
+		}
+	}
+
+	public function isSpectator(Player $player) : bool{
+		return isset($this->spectators[spl_object_hash($player)]);
+	}
+
+	public function getOpponent(Player $player) : Party{
+		$firstParty = $this->firstParty;
+		$secondParty = $this->secondParty;
+
+		if($firstParty->isMember($player)){
+			return $secondParty;
+		}
+		return $firstParty;
+	}
+
+	public function removeSpectator(Player $player) : void{
+		$hash = spl_object_hash($player);
+
+		if(!$this->isSpectator($player)){
+			return;
+		}
+		unset($this->spectators[$hash]);
+	}
+
+	public function handleBreak(BlockBreakEvent $event) : void{
+		$block = $event->getBlock();
+
+		if(!isset($this->blocks[(string) $block->getPosition()])){
+			$event->cancel();
+			return;
+		}
+		unset($this->blocks[(string) $block->getPosition()]);
+	}
+
+	public function handlePlace(BlockPlaceEvent $event) : void{
+		foreach($event->getTransaction()->getBlocks() as [$x, $y, $z, $block]){
+			$this->blocks[(string) $block->getPosition()] = $block;
+		}
+	}
+
+	public function handleDamage(EntityDamageEvent $event) : void{
+		$player = $event->getEntity();
+
+		if(!$player instanceof Player){
+			return;
+		}
+		$finalHealth = $player->getHealth() - $event->getFinalDamage();
+
+		if(!$this->isRunning()){
+			$event->cancel();
+			return;
+		}
+		$d = null;
+
+		if($event instanceof EntityDamageByEntityEvent){
+			$damager = $event->getDamager();
+
+			if(!$damager instanceof Player){
+				return;
+			}
+
+			if(!$this->isPlayer($damager)){
+				$event->cancel();
+				return;
+			}
+			$playerOpponent = $this->getOpponent($player);
+			$damagerOpponent = $this->getOpponent($damager);
+
+			if($playerOpponent->getName() === $damagerOpponent->getName()){
+				$event->cancel();
+				return;
+			}
+			$d = $damager;
+		}
+
+		if($finalHealth <= 0.00){
+			$event->cancel();
+            
+            $location = $player->getLocation();
+            ServerUtils::spawnActor("minecraft:lightning_bolt", $location);
+            ServerUtils::playSound("ambient.weather.thunder", $location);
+            
+			$this->firstParty->broadcastMessage(TextFormat::colorize('&c' . $player->getName() . ($d === null ? ' &edied' : ' &ewas slain by &c' . $d->getName())));
+			$this->secondParty->broadcastMessage(TextFormat::colorize('&c' . $player->getName() . ($d === null ? ' &edied' : ' &ewas slain by &c' . $d->getName())));
+
+			$this->addSpectator($player);
+			$this->checkWinner();
+		}
+	}
+    
+    public function handleItemUse(\pocketmine\event\player\PlayerItemUseEvent $event): void
+{
+    $player = $event->getPlayer();
+    $item = $event->getItem();
+
+    if ($item instanceof \pocketmine\item\MushroomStew) {
+
+        $event->cancel();
+
+        $newHealth = min(
+            $player->getHealth() + 9.0,
+            $player->getMaxHealth()
+        );
+
+        $player->setHealth($newHealth);
+
+        $hand = $player->getInventory()->getItemInHand();
+        $hand->setCount($hand->getCount() - 1);
+
+        $player->getInventory()->setItemInHand($hand);
+
+        $player->getInventory()->addItem(
+            \pocketmine\item\VanillaItems::BOWL()
+        );
+
+        $player->getWorld()->addParticle(
+            $player->getPosition(),
+            new \pocketmine\world\particle\HeartParticle()
+        );
+    }
+}
+
+	public function isRunning() : bool{
+		return $this->status === self::RUNNING;
+	}
+
+	public function isPlayer(Player $player) : bool{
+		if($this->isSpectator($player)){
+			return false;
+		}
+		return $this->firstParty->isMember($player) || $this->secondParty->isMember($player);
+	}
+
+	public function addSpectator(Player $player) : void{
+		$this->spectators[spl_object_hash($player)] = $player;
+
+		$player->getArmorInventory()->clearAll();
+		$player->getInventory()->clearAll();
+		$player->getCursorInventory()->clearAll();
+		$player->getOffHandInventory()->clearAll();
+
+		$player->setGamemode(GameMode::SPECTATOR());
+	}
+
+	public function checkWinner() : void{
+		$firstParty = array_filter($this->firstParty->getMembers(), function(Player $player) : bool{
+			return !$this->isSpectator($player);
+		});
+		$secondParty = array_filter($this->secondParty->getMembers(), function(Player $player) : bool{
+			return !$this->isSpectator($player);
+		});
+
+		if(count($firstParty) === 0){
+			$this->finish($this->firstParty);
+		}elseif(count($secondParty) === 0){
+			$this->finish($this->secondParty);
+		}
+	}
+
+	public function finish(Party $loser) : void{
+		$this->loser = $loser->getName();
+
+		if($this->firstParty->getName() === $loser->getName()){
+			$this->winner = $this->secondParty->getName();
+
+			$this->secondParty->broadcastTitle(TextFormat::colorize('&l&aWON!&r'), TextFormat::colorize('&7Your party won the fight!'));
+		}else{
+			$this->winner = $this->firstParty->getName();
+			$this->firstParty->broadcastTitle(TextFormat::colorize('&l&aWON!&r'), TextFormat::colorize('&7Your party won the fight!'));
+		}
+		$loser->broadcastTitle(TextFormat::colorize('&l&cDEFEAT!&r'), TextFormat::colorize('&a' . $this->winner . '&7 won the fight!'));
+		$members = array_merge($this->firstParty->getMembers(), $this->secondParty->getMembers());
+
+		foreach($members as $member){
+			if($member->isOnline()){
+				$member->getArmorInventory()->clearAll();
+				$member->getInventory()->clearAll();
+				$member->getOffHandInventory()->clearAll();
+				$member->getCursorInventory()->clearAll();
+
+				$member->getEffects()->clear();
+
+				$member->setHealth($member->getMaxHealth());
+			}
+		}
+		$this->status = self::RESTARTING;
+		$this->log();
+	}
+
+	public function handleMove(PlayerMoveEvent $event) : void{
+		// Nothing
+	}
+
+	public function update() : void{
+		$firstParty = $this->firstParty;
+		$secondParty = $this->secondParty;
+
+		switch($this->status){
+			case self::STARTING:
+				$members = array_merge($firstParty->getMembers(), $secondParty->getMembers());
+
+				if($this->starting <= 0){
+					$this->status = self::RUNNING;
+
+					foreach($members as $member){
+						if($member->isOnline()){
+							if($member->hasNoClientPredictions()){
+								$member->setNoClientPredictions(false);
+								$member->sendMessage(TextFormat::colorize('&eMatch started.'));
+								$member->sendTitle('Match Started!', TextFormat::colorize('&7The match has begun.'));
+							}
+						}
+					}
+					return;
+				}
+				foreach($members as $member){
+					if($member->isOnline()){
+						$member->sendMessage(TextFormat::colorize('&7The match will be starting in &e' . $this->starting . '&7..'));
+						$member->sendTitle('Match starting', TextFormat::colorize('&7The match will be starting in &e' . $this->starting . '&7..'));
+					}
+				}
+				$this->starting--;
+				break;
+
+			case self::RUNNING:
+				$this->running++;
+				break;
+
+			case self::RESTARTING:
+				if($this->restarting <= 0){
+					foreach($firstParty->getMembers() as $member){
+						$member->setGamemode(GameMode::SURVIVAL());
+						$member->setHealth($member->getMaxHealth());
+						$member->setNameTag($member->getName());
+						$member->getInventory()->clearAll();
+						$member->getArmorInventory()->clearAll();
+						$member->teleport($member->getServer()->getWorldManager()->getDefaultWorld()->getSpawnLocation());
+
+						if($this->mainParty !== null){
+							$this->mainParty->giveItems($member);
+						}else{
+							$firstParty->giveItems($member);
+						}
+					}
+
+					foreach($secondParty->getMembers() as $member){
+						$member->setGamemode(GameMode::SURVIVAL());
+						$member->setHealth($member->getMaxHealth());
+						$member->setNameTag($member->getName());
+						$member->getInventory()->clearAll();
+						$member->getArmorInventory()->clearAll();
+						$member->teleport($member->getServer()->getWorldManager()->getDefaultWorld()->getSpawnLocation());
+
+						if($this->mainParty !== null){
+							$this->mainParty->giveItems($member);
+						}else{
+							$secondParty->giveItems($member);
+						}
+					}
+					$firstParty->setDuel(null);
+					$secondParty->setDuel(null);
+
+					if($this->mainParty !== null){
+						$this->mainParty->setDuel(null);
+					}
+
+					$this->delete();
+					return;
+				}
+				$this->restarting--;
+				break;
+		}
+	}
+
+	public function delete() : void{
+		Practice::getInstance()->getServer()->getWorldManager()->unloadWorld($this->world);
+		Practice::getInstance()->getServer()->getAsyncPool()->submitTask(new WorldDeleteAsync(
+			'party-duel-' . $this->id,
+			Practice::getInstance()->getServer()->getDataPath() . 'worlds'
+		));
+		DuelFactory::remove($this->id);
+	}
+
+	protected function log() : void{
+		$webhook = new Webhook(Practice::getInstance()->getConfig()->get('webhook-parties', ''));
+		$message = new Message();
+		$embed = new Embed();
+
+		if($this->winner === $this->firstParty->getName()){
+			$winner = $this->firstParty;
+			$loser = $this->secondParty;
+		}else{
+			$winner = $this->secondParty;
+			$loser = $this->firstParty;
+		}
+		$embed->setColor(hexdec('00a6ff'));
+		$embed->setTitle('Party Duel - ' . DuelFactory::getName($this->typeId));
+		$embed->setDescription(
+			'**Winner:** ' . $winner->getName() . PHP_EOL .
+			implode(PHP_EOL, array_map(fn(Player $player) => '- ' . $player->getName(), $winner->getMembers())) . PHP_EOL .
+			'**Loser:** ' . $loser->getName() . PHP_EOL .
+			implode(PHP_EOL, array_map(fn(Player $player) => '- ' . $player->getName(), $loser->getMembers()))
+		);
+
+		$message->addEmbed($embed);
+		$webhook->send($message);
+	}
+}
